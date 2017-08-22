@@ -21,6 +21,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"syscall"
 
 	"golang.org/x/net/context"
 
@@ -36,7 +37,7 @@ import (
 )
 
 var (
-	flagInterfaces = flag.String("interfaces", "mv100,mv101,mv102,mv103,mv200,mv201", "comma-separated list of valid interfaces")
+	flagInterfaces = flag.String("interfaces", "", "comma-separated list of valid interfaces")
 	flagAddr       = flag.String("addr", "[::1]:21001", "address to listen for gRPC requests on")
 )
 
@@ -55,13 +56,15 @@ func (d *macDB) Run() error {
 		return nil
 	}
 
-	ch := make(chan netlink.LinkUpdate)
+	ch := make(chan netlink.LinkUpdate, 10)
 	d.done = make(chan struct{})
 	d.intfs = make(map[string]netlink.Link)
+	log.Printf("subscribing")
 	if err := netlink.LinkSubscribe(ch, d.done); err != nil {
 		return err
 	}
 
+	log.Printf("populating")
 	if err := d.populate(); err != nil {
 		return fmt.Errorf("populating DB initially: %v", err)
 	}
@@ -71,25 +74,36 @@ func (d *macDB) Run() error {
 }
 
 func (d *macDB) watch(ch <-chan netlink.LinkUpdate) {
+	log.Printf("running watcher")
 	done := d.done
 	for {
 		select {
 		case lu := <-ch:
+			log.Printf("%#v (%T)", lu, lu.Link)
 			ln := lu.Link
 			if _, ok := ln.(*netlink.Macvlan); !ok {
 				// skip things which aren't macvlan
 				continue
 			}
 			name := ln.Attrs().Name
-			d.mu.RLock()
-			_, ok := d.intfs[name]
-			d.mu.RUnlock()
-			if !ok {
-				// skip interfaces we don't care about
-				continue
+
+			if d.Interfaces != nil {
+				d.mu.RLock()
+				_, ok := d.intfs[name]
+				d.mu.RUnlock()
+				if !ok {
+					// skip interfaces we don't care about
+					continue
+				}
 			}
+
 			d.mu.Lock()
-			d.intfs[name] = ln
+			// if the interface is going away, then we should delete it from d.intfs instead
+			if lu.Header.Type != syscall.RTM_DELLINK {
+				d.intfs[name] = ln
+			} else {
+				delete(d.intfs, name)
+			}
 			if err := d.updateMACDBForInterfaceLocked(ln); err != nil {
 				log.Printf("updateMACDBForInterfaceLocked(%v): %v", name, err)
 			}
@@ -102,12 +116,26 @@ func (d *macDB) watch(ch <-chan netlink.LinkUpdate) {
 
 func (d *macDB) populate() error {
 	d.mu.Lock()
-	for _, intf := range d.Interfaces {
-		ln, err := netlink.LinkByName(intf)
-		if err != nil {
-			return fmt.Errorf("LinkByName(%v): %v", intf, err)
+	if d.Interfaces != nil {
+		for _, intf := range d.Interfaces {
+			ln, err := netlink.LinkByName(intf)
+			if err != nil {
+				return fmt.Errorf("LinkByName(%v): %v", intf, err)
+			}
+			d.intfs[ln.Attrs().Name] = ln
 		}
-		d.intfs[ln.Attrs().Name] = ln
+	} else {
+		// populate with all macvlan interfaces
+		lns, err := netlink.LinkList()
+		if err != nil {
+			return fmt.Errorf("LinkList(): %v", err)
+		}
+
+		for _, ln := range lns {
+			if _, ok := ln.(*netlink.Macvlan); ok {
+				d.intfs[ln.Attrs().Name] = ln
+			}
+		}
 	}
 	if err := d.updateMACDBLocked(); err != nil {
 		return err
@@ -148,6 +176,7 @@ func (d *macDB) updateMACDBForInterfaceLocked(ln netlink.Link) error {
 	for _, m := range mv.MACAddrs {
 		myMACs[m.String()] = 1
 	}
+	log.Printf("new macs: %v", myMACs)
 
 	for ms, mname := range d.knownMACs {
 		if name == mname && myMACs[ms] != 1 {
@@ -166,6 +195,7 @@ func (d *macDB) updateMACDBForInterfaceLocked(ln netlink.Link) error {
 }
 
 func (d *macDB) Stop() {
+	log.Printf("stopping")
 	if d.done != nil {
 		close(d.done)
 		d.done = nil
@@ -219,6 +249,20 @@ func (d *macDB) GetKnownMACs() ([]net.HardwareAddr, error) {
 	return macs, nil
 }
 
+func (d *macDB) updateInterfaceLocked(oldln netlink.Link) error {
+	ln, err := netlink.LinkByIndex(oldln.Attrs().Index)
+	if err != nil {
+		return fmt.Errorf("LinkByIndex(%v) - for %v: %v", oldln.Attrs().Index, oldln.Attrs().Name, err)
+	}
+	delete(d.intfs, oldln.Attrs().Name)
+	d.intfs[ln.Attrs().Name] = ln
+
+	if err := d.updateMACDBForInterfaceLocked(ln); err != nil {
+		return fmt.Errorf("updateMACDBForInterfaceLocked: %v", err)
+	}
+	return nil
+}
+
 func (d *macDB) SetInterfaceForMAC(mac net.HardwareAddr, intf string) error {
 	ms := mac.String()
 	log.Printf("setting interface for %q to %q", ms, intf)
@@ -234,6 +278,9 @@ func (d *macDB) SetInterfaceForMAC(mac net.HardwareAddr, intf string) error {
 		if err := netlink.MacvlanMACAddrDel(oldln, mac); err != nil {
 			return fmt.Errorf("deregistering from %v: %v", oldintf, err)
 		}
+		if err := d.updateInterfaceLocked(oldln); err != nil {
+			return fmt.Errorf("updateInterfaceLocked(%v): %v", oldln.Attrs().Name, err)
+		}
 	}
 
 	if intf == "" {
@@ -247,6 +294,9 @@ func (d *macDB) SetInterfaceForMAC(mac net.HardwareAddr, intf string) error {
 	}
 	if err := netlink.MacvlanMACAddrAdd(ln, mac); err != nil {
 		return fmt.Errorf("registering with %v: %v", intf, err)
+	}
+	if err := d.updateInterfaceLocked(ln); err != nil {
+		return fmt.Errorf("updateInterfaceLocked(%v): %v", ln.Attrs().Name, err)
 	}
 	return nil
 }
@@ -325,7 +375,13 @@ func main() {
 	log.Printf("interfaces: %v", *flagInterfaces)
 	log.Printf("addr: %v", *flagAddr)
 
-	intfs := strings.Split(*flagInterfaces, ",")
+	var intfs []string
+	if *flagInterfaces != "" {
+		intfs = strings.Split(*flagInterfaces, ",")
+	} else {
+		log.Printf("watching all interfaces")
+	}
+
 	mdb := macDB{Interfaces: intfs}
 	if err := mdb.Run(); err != nil {
 		log.Fatalf("failed to watch interfaces: %v", err)
