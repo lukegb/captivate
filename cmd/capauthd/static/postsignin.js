@@ -13,6 +13,7 @@
 			.then((j) => {
 				if (j.ok) {
 					resolve();
+					return;
 				}
 				throw new Error('Not ready yet.');
 			})
