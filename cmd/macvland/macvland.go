@@ -156,7 +156,7 @@ func (d *macDB) updateMACDBForInterfaceLocked(ln netlink.Link) error {
 	}
 
 	for ms := range myMACs {
-		if other, ok := d.knownMACs[ms]; ok {
+		if other, ok := d.knownMACs[ms]; ok && other != name {
 			log.Printf("warning while associating with %v: %v is already associated with another macvlan: %v; overwriting", name, ms, other)
 		}
 		d.knownMACs[ms] = name
