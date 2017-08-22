@@ -357,12 +357,14 @@ body {
 
 		sentState := r.URL.Query().Get("state")
 		if sentState != mac.String() {
+			log.Printf("client sent bad state: MAC is %q, but state was %q", mac, sentState)
 			http.Error(w, "bad session state", http.StatusBadRequest)
 			return
 		}
 
 		tok, err := conf.Exchange(ctx, r.URL.Query().Get("code"))
 		if err != nil {
+			log.Printf("failed to exchange oauth token for %v: %v", mac, err)
 			http.Error(w, "bad oauth token", http.StatusBadRequest)
 			return
 		}
@@ -370,6 +372,7 @@ body {
 		client := conf.Client(ctx, tok)
 		resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
 		if err != nil {
+			log.Printf("failed to retrieve userinfo for %v: %v", mac, err)
 			http.Error(w, fmt.Sprintf("google userinfo API failed: %v", err), http.StatusBadGateway)
 			return
 		}
@@ -381,11 +384,13 @@ body {
 		}
 		var d Data
 		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+			log.Printf("failed to decode userinfo for %v: %v", mac, err)
 			http.Error(w, fmt.Sprintf("google userinfo API returned garbage: %v", err), http.StatusBadGateway)
 			return
 		}
 
 		if !d.EmailVerified {
+			log.Printf("google says %v does not have verified email (MAC: %q)", d.Email, mac)
 			http.Error(w, fmt.Sprintf("user %v does not have verified email", d.Email), http.StatusBadRequest)
 			return
 		}
