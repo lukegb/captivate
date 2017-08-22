@@ -38,7 +38,7 @@ func main() {
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
 			Name:  "addr",
-			Value: "[2a07:1c44:3636:50::]:21001",
+			Value: "[::1]:21001",
 			Usage: "address of macvland server",
 		},
 	}
