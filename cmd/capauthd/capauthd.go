@@ -25,6 +25,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -32,6 +33,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	rice "github.com/GeertJohan/go.rice"
 	pb "github.com/lukegb/captivate/captivated"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
@@ -56,6 +58,15 @@ var (
 
 	flagListenAddr = flag.String("addr", "[2a07:1c44:3636:201::1337]:443,172.27.201.1:443", "comma-separated addresses to listen on")
 )
+
+func isDone(remoteAddr string) (bool, error) {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false, err
+	}
+
+	return !strings.HasPrefix(host, "2a07:1c44:3636:201:") && !strings.HasPrefix(host, "172.27.201."), nil
+}
 
 func listen(n string, tc *ctls.Config) {
 	log.Printf("listening for connections on %v", n)
@@ -135,131 +146,55 @@ func main() {
 		Endpoint: google.Endpoint,
 	}
 
-	const styleCSS = `
-* { box-sizing: border-box; }
-html, body {
-	padding: 0; margin: 0;
-}
-
-h1 {
-	margin: 0;
-}
-
-body {
-	font-family: Helvetica, Arial, sans-serif;
-	background-color: whitesmoke;
-}
-
-#box {
-	position: relative;
-	margin: 5vh auto 0;
-	width: 75vw;
-	background: white;
-	border: 1px solid #ddd;
-
-	padding: 50px 20px;
-	text-align: center;
-}
-
-@media screen and (max-width: 600px) {
-	#box {
-		width: 100vw;
-		border-left: 0;
-		border-right: 0;
+	log.Printf("loading resources")
+	templateBox, err := rice.FindBox("templates")
+	if err != nil {
+		log.Fatalf("failed to find `templates`: %v", err)
 	}
-}
-`
 
-	const postSigninJS = `
-(function() {
-	"use strict";
-
-	console.log("Beginning post-signin checks.");
-
-	const fetchAndReturnWhenReady = (url) => new Promise((resolve, reject) => {
-		const attemptFetch = () => {
-			fetch(url)
-			.then((res) => {
-				if (!res.ok) throw new Error('Failed to fetch ' + url);
-				return res.json();
-			})
-			.then((j) => {
-				if (j.ok) {
-					resolve();
-				}
-				throw new Error('Not ready yet.');
-			})
-			.catch((err) => {
-				console.error(err);
-				setTimeout(attemptFetch, 1000);
-			});
-		};
-		attemptFetch();
-	});
-
-	Promise.all([
-		fetchAndReturnWhenReady('https://v4-captive.house.as205479.net/isdone'),
-		fetchAndReturnWhenReady('https://v6-captive.house.as205479.net/isdone'),
-	]).then(() => {
-		let nextURL = document.querySelector('meta[name="next-url"]').value;
-		if (!nextURL) {
-			nextURL = 'https://as205479.net';
+	templates := make(map[string]*template.Template)
+	templateBox.Walk("", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
 		}
-		window.location = nextURL;
-	});
+		if info.IsDir() {
+			return nil
+		}
+		tplStr, err := templateBox.String(path)
+		if err != nil {
+			log.Printf("failed to read %q: %v", path, err)
+			return err
+		}
+		tpl, err := template.New(path).Parse(tplStr)
+		if err != nil {
+			log.Printf("failed to parse %q: %v", path, err)
+			return err
+		}
+		templates[path] = tpl
+		return nil
+	})
 
-})();
-`
-
-	const indexRawTpl = `<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="utf-8">
-	<title>Welcome to AS205479 Wifi</title>
-	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-	<link rel="stylesheet" type="text/css" href="/style.css">
-</head>
-<body>
-	<div id="box">
-		<h1>Welcome to AS205479 Wifi</h1>
-		<p>Please log in with your Google account to continue:</p>
-		<a href="/start"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAL8AAAAuCAYAAAB50MjgAAAI00lEQVR4AezUA25EYQBF4Rr7qW27cWrbjOqo+yqjWnFtG7fvD2ob5ybf2HNmbNg/H2OM2VrsLPZ/DGBn+n40fO+mqeSgju2FkK49/SWA6dq3YTrlsR+AQ1D71mLfzKl+2sxreu+bB0zfpvOH4ncxN/ip+4g3D5jOH4rflfjx15nOif9XAvEDxA8QP0D8APEDxI8vQPwnk2Pa6e7QRkmmVpNCtRLrr/WMFOuydh0P9hL/30P8Z0uL2qwp0kqo+5M2KvN0tjBH/Pgb8Z+MDWs1NfLh4B+wWV/6++MH8Z+tLms1MeRe4OuZqdpub9ZWa6PW0pOv//mL0nW+s/1l8V+2dx6wjRxXGE5PUNIrSipaeu+998S90um9udtM73GThatMACmwoDS5MRdVyIKlgxmEhHDnQkOMFUYhAfIaj8yRwN42zu7+WXJeZjzUirpGNcwDfgi7s5yZffvNmzezkhgbspGcb2L2/ibG5hxc3ifLvpZ0kSsxDA/1wMl9FmaXGDJpu+cPc3eaIbfo4vKVfDDaBANQXXROru6EhRHy3XTawQ2JNQZ1u4MqAFZr4msbEf76dd9SoK9d/Ck46RQ6zUnNofHDK1Xwewz/4IKP5RZg+nazXT5cQttYiaA4g4olGbh5BGWvZCIPbskEPx5ZYMgXm/hZHw3yKd4Xo3ji9xmfY2BYboX77TWF3wAAl+HyjQZ/cOzvON7/fBz96Js4+Bd+At7BAxtit+es25sC9tz9Dm643UHqUEA8cmfGhsJzC030D/QGypHWbDNl9RySn824SM07+Bq1m3X5fQ9v74B/6QThH3Bhg1u1GPrndhtjix4AqjexdvDXAcBiGy/ye//8Bti9T4T956ehdt7rYN8zgR7aSUbeJkCOO0uct3HYAwC//QB/lmKoGj5mR00B7GzJ5xHPC1A+5KNuhT+zdvggbBSMAPUaQ2bJa1/DvACFrCPrl2pfn28EOFx0EaP+tOo6fIghX+ODkLk+pqltFT4HZSsIwXN53X02coZ6nA+PjUoTX6M+1xsedg/wPjKA6g+QGjUF/KzhybYtH2O3m9FpFM2YrOIq56craFt+TvprJOvBcNE22/AwllTrvHyqibIRCH/l7lf91Z9mMDwaaCXuG35f0fBfPury+jx+f/vT9vrAzzJvaMHfljv9AgSeh067YdTpqtQjrDdpz5ArIKgfamL3n5Y/6OEiByE3w8vGKhBmWBBmFx2agqPLU7evPmV/bYZBmBeIBw6vY0onuA/zQtzQmsVGGbj56G+V06yGWhNntSK9xSPyyG12a9Ao7WQE/PKcLdr28LMI342ofllRw0uyLUO2i1TSlAGIzLbEoBQz0OUzTCkXRj5T4OezuTKwAdBgtNYB/r3PFvCzfe87JWB3Tjs9y/n75z0o5gXIztsi8gwuyYcsHI0AyT/JNQPlykr5GJXTYCFIuk7ZEkCDEew2yh5BG5FGTNfQtrGBMBJLyLA/eRzxNL+vctpqR9/9lkxH5LFMe0667Yrwi4i2qSxf+LZ+Dv+J+8tQ/CH9hQYflBmKFmVaJ5z1J1d8ZnC7LD+cpfIkwW2xyMg/Sz4pzFviesjyzQf/rRO9gp+UsDG96KHugoxgVuFvPRjh+JjYJWEq/B3lw6XgpOGnqBcBraqf0cDNpx0e2cnqiy7GSgGHbiiqHjkTENgn2baEMjulbgzISGtSFKbZJ2q2ixiEtB6hvqvlUT5Tj03hB2YF7XS1aqkzxRqnPa8X8Bv3vQie76HTPv87U9Elu1VQfr/X7Qn8lycdjKVdZTH7M9rBIIdHw++S49Vdksj8kz5/cvAXuwKopG02pJXnHaRq5HdKWeKR9chjgv9k26b7khE7ljARHzAxJgc71bkc/rqEXwyi5EAn/MDs7Y8qT5wk/G7QXj8ZoaqNAPVKc+0jv7vw1Tb4ueln47N3fhwThb1YzfbsayodmXm4Fzm/zOfZIXc5kARGZ9pjEFT9fTRY0t56wE+ykOegiPQnTrNB93rk8WDfycKv3jfgYzCh+DTSXzdQucjhjSZiog1g/5Qp1jIy3ZLlWfKf2GWKhF9en5uT/o5POYj3rcOC167OYs/Ey/DO28/Gm28/Dx//21dRNo5gJWuYAS77rez4h0KF53oCv7I4Mjzkih7qnjpNqvDKSATXb12vgpZwYJw8/NRWdwApQkcvPKmOuDobUJtRaY6MkEbDa+3onHTbspxfUygyFPgukeKv2Zr0V7bogUGFM56SPiwsMVRdiF2ks0Rqx61cDMvpUMy+qg+V+g6XGHKVQAy2s9bjJdd39v6yBb7Qp0a/jtTBfei0xWMFfPG2gtKJG0btHm11yje4ZQuKGQ2G3QkJrxJ5ttvINiCMSfh51OqAvz/r0+e7wG90yfmNbpFf7hDV5WeQVfPkyHpukFAhP2OefNv0hjpzyF+2YZDPOog9+hoCULR3v6Num95Pg4LMqMiXby2NLMo24EEsYC9f7kPaxGAUAGRgGxxYpze8FbOGDyQ/T/BLnTvxXXz/H/34UXobLrvnuva5t/wlhvdsu6/dgc/cehxHGn4P4Zc6a3sIQCLU9tXeDbjI3O+0r2vtViQp8lYXeO67qUT3fNr19P3fd2ZX/8ZCndWtjgHhf2WApRabuCEsOyscEPEZpq67VhTvU2z7BvjFtoer/8JH93yZwF9dnxr+Ix4oehvsF9tMZORugtwdkqnBGZbWDVlf+LhuBDJFSlub61eaDx8/im/M/XRV8M+fvByPHPvPxvytzoSNVJG/sWQef5s7PNS79rRMDN7PULX4G1vb8pFJ2Zv3j1ly//03fjmfwOdn4vjgX7+Ad911CT47/i38ML0N95bS8ANf/zHLqUhL/xmjlpaGX0tLw6+lpeHX0tLwa2lp+LW0NPxaWhp+LS0Nf6e0NPxPed8vake36hfSaWm1+F7pO7me9KqLhq5838+rVe2orSatFtevuGjoihbnUfA/LtRzQ70+1NtCvX2LSEvrbcT1c4nz5UYFT6TRsZWkpfVE4lubNm3/A+IlMI3W6/bdAAAAAElFTkSuQmCC"></a>
-	</div>
-</body>
-</html>
-`
-	indexTpl, err := template.New("index").Parse(indexRawTpl)
+	staticBox, err := rice.FindBox("static")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("failed to find `static`: %v", err)
 	}
-
-	const doneRawTpl = `<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="utf-8">
-	<title>Welcome to AS205479 Wifi</title>
-	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-	<link rel="stylesheet" type="text/css" href="/style.css">
-	<script src="/postsignin.js" async defer></script>
-	<meta name="next-url" content="{{.Next}}">
-</head>
-<body>
-	<div id="box">
-		<h1>Welcome to AS205479 Wifi</h1>
-		<h2>Please wait while you're logged in...</h2>
-		<p>This may take about a minute, and only happens the first time you connect to this wifi network from this device.</p>
-	</div>
-</body>
-</html>
-`
-	doneTpl, err := template.New("done").Parse(doneRawTpl)
-	if err != nil {
-		log.Fatal(err)
-	}
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(staticBox.HTTPBox())))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.Error(w, "page not found", http.StatusNotFound)
+			return
+		}
+
+		done, err := isDone(r.RemoteAddr)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if done {
+			w.Header().Set("Location", "https://as205479.net")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			fmt.Fprintf(w, "Redirecting...")
 			return
 		}
 
@@ -271,8 +206,7 @@ body {
 			ClientID: *flagClientID,
 		}
 
-		err := indexTpl.Execute(w, d)
-		if err != nil {
+		if err := templates["index.html"].Execute(w, d); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
@@ -298,29 +232,19 @@ body {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 		fmt.Fprintf(w, "<a href=\"%s\">Redirecting...</a>", loginURL)
 	})
-	http.HandleFunc("/postsignin.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript")
-		fmt.Fprint(w, postSigninJS)
-	})
-	http.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css")
-		fmt.Fprint(w, styleCSS)
-	})
 	http.HandleFunc("/isdone", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "https://captive.house.as205479.net")
 		w.Header().Set("Access-Control-Allow-Methods", "GET")
 
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		done, err := isDone(r.RemoteAddr)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		isBad := strings.HasPrefix(host, "2a07:1c44:3636:201:") || strings.HasPrefix(host, "172.27.201.")
-
 		v := struct {
 			OK bool `json:"ok"`
-		}{!isBad}
+		}{done}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(v)
@@ -335,6 +259,18 @@ body {
 		if r.Method != "GET" {
 			w.Header().Set("Allow", "GET")
 			http.Error(w, "must be a GET", http.StatusMethodNotAllowed)
+			return
+		}
+
+		done, err := isDone(r.RemoteAddr)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if done {
+			w.Header().Set("Location", "https://as205479.net")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+			fmt.Fprintf(w, "Redirecting...")
 			return
 		}
 
@@ -407,7 +343,7 @@ body {
 		d2 := struct {
 			Next string
 		}{next}
-		if err := doneTpl.Execute(w, d2); err != nil {
+		if err := templates["pleasewait.html"].Execute(w, d2); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})

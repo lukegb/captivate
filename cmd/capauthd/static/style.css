@@ -1,0 +1,32 @@
+* { box-sizing: border-box; }
+html, body {
+	padding: 0; margin: 0;
+}
+
+h1 {
+	margin: 0;
+}
+
+body {
+	font-family: Helvetica, Arial, sans-serif;
+	background-color: whitesmoke;
+}
+
+#box {
+	position: relative;
+	margin: 5vh auto 0;
+	width: 75vw;
+	background: white;
+	border: 1px solid #ddd;
+
+	padding: 50px 20px;
+	text-align: center;
+}
+
+@media screen and (max-width: 600px) {
+	#box {
+		width: 100vw;
+		border-left: 0;
+		border-right: 0;
+	}
+}
