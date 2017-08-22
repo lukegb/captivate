@@ -17,9 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"net"
-	"sync"
+	"time"
 
+	_ "github.com/lib/pq"
 	pb "github.com/lukegb/captivate/captivated"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -32,62 +35,86 @@ import (
 var (
 	flagAddr        = flag.String("addr", "[::1]:21000", "address to listen for gRPC requests on")
 	flagMACVLANAddr = flag.String("macvland-addr", "[::1]:21001", "address to connect to macvland on")
-
-	unknownVLAN     = 201
-	guestVLAN       = 200
-	vlanToInterface = map[int]string{
-		100: "mv100",
-		101: "mv101",
-		102: "mv102",
-		103: "mv103",
-		200: "mv200",
-		201: "mv201",
-	}
+	flagDatabase    = flag.String("db-conn", "user=captivated dbname=captivated sslmode=disable", "database connection string")
 )
 
 type server struct {
-	mvln       pb.MACVLANClient
-	mu         sync.Mutex
-	macsToVLAN map[string]int
+	mvln pb.MACVLANClient
+	db   *Database
 }
 
 func (s *server) SawClient(ctx context.Context, req *pb.SawClientRequest) (*pb.SawClientReply, error) {
-	// assign to captive VLAN
-	log.Printf("SawClient: MAC=%v", req.Mac)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-	s.mu.Lock()
-	vlanToAssign, ok := s.macsToVLAN[req.Mac]
-	s.mu.Unlock()
-
-	if !ok {
-		vlanToAssign = unknownVLAN
+	mac, err := net.ParseMAC(req.Mac)
+	if err != nil {
+		log.Printf("SawClient rejected MAC %v: %v", req.Mac, err)
+		return nil, fmt.Errorf("invalid MAC %v", req.Mac)
 	}
 
-	_, err := s.mvln.Authorise(ctx, &pb.AuthoriseRequest{
-		Interface: vlanToInterface[vlanToAssign],
-		Mac:       req.Mac,
+	log.Printf("SawClient: MAC=%v; macvlan is pending", mac)
+	mvlan, err := s.db.GetMACVLANInterfaceForDevice(ctx, mac)
+	if err != nil {
+		log.Printf("SawClient got error from GetMACVLANInterfaceForDevice(%v): %v", mac, err)
+		return nil, fmt.Errorf("GetMACVLANInterfaceForDevice(%v): %v", mac, err)
+	}
+
+	err = s.db.MarkDeviceSeen(ctx, mac)
+	if err != nil {
+		log.Printf("SawClient got error from MarkDeviceSeen(%v): %v; carrying on anyway", mac, err)
+	}
+
+	log.Printf("SawClient: MAC=%v; macvlan=%v", mac, mvlan)
+
+	_, err = s.mvln.Authorise(ctx, &pb.AuthoriseRequest{
+		Interface: mvlan,
+		Mac:       mac.String(),
 	})
 	if err != nil {
-		log.Printf("SawClient: error Authorising %v onto unknownVLAN %v: %v", req.Mac, unknownVLAN, err)
+		log.Printf("SawClient got error from Authorise %v onto %v: %v", req.Mac, mvlan, err)
 		return nil, err
 	}
 	return &pb.SawClientReply{}, nil
 }
 
 func (s *server) ClientAuthenticated(ctx context.Context, req *pb.ClientAuthenticatedRequest) (*pb.ClientAuthenticatedReply, error) {
-	// assign to default VLAN
-	// TODO: actual logic
-	s.mu.Lock()
-	s.macsToVLAN[req.Mac] = guestVLAN
-	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-	log.Printf("ClientAuthenticated: MAC=%v; Email=%v", req.Mac, req.Email)
-	_, err := s.mvln.Authorise(ctx, &pb.AuthoriseRequest{
-		Interface: vlanToInterface[guestVLAN],
-		Mac:       req.Mac,
+	mac, err := net.ParseMAC(req.Mac)
+	if err != nil {
+		log.Printf("ClientAuthenticated rejected MAC %v: %v", req.Mac, err)
+		return nil, fmt.Errorf("invalid MAC %v", req.Mac)
+	}
+
+	log.Printf("ClientAuthenticated: MAC=%v; Email=%v; macvlan is pending", mac, req.Email)
+
+	err = s.db.SetUserForDevice(ctx, mac, req.Email)
+	if err != nil {
+		log.Printf("ClientAuthenticated got error from SetUserForDevice(%v, %v): %v", mac, req.Email, err)
+		return nil, err
+	}
+
+	err = s.db.MarkDeviceSeen(ctx, mac)
+	if err != nil {
+		log.Printf("ClientAuthenticated got error from MarkDeviceSeen(%v): %v; carrying on anyway", mac, err)
+	}
+
+	mvlan, err := s.db.GetMACVLANInterfaceForDevice(ctx, mac)
+	if err != nil {
+		log.Printf("ClientAuthenticated got error from GetMACVLANInterfaceForDevice(%v): %v", mac, err)
+		return nil, fmt.Errorf("GetMACVLANInterfaceForDevice(%v): %v", mac, err)
+	}
+
+	log.Printf("ClientAuthenticated: MAC=%v; Email=%v; macvlan=%v", mac, req.Email, mvlan)
+
+	_, err = s.mvln.Authorise(ctx, &pb.AuthoriseRequest{
+		Interface: mvlan,
+		Mac:       mac.String(),
 	})
 	if err != nil {
-		log.Printf("ClientAuthenticated: error Authorising %v onto %v: %v", req.Mac, guestVLAN, err)
+		log.Printf("ClientAuthenticated: error Authorise %v onto %v: %v", req.Mac, mvlan, err)
 		return nil, err
 	}
 	return &pb.ClientAuthenticatedReply{}, nil
@@ -99,6 +126,7 @@ func main() {
 	log.Println("captivated starting up")
 	log.Printf("addr: %v", *flagAddr)
 	log.Printf("macvland-addr: %v", *flagMACVLANAddr)
+	log.Printf("db-conn: %v", *flagDatabase)
 
 	mvconn, err := grpc.Dial(*flagMACVLANAddr, grpc.WithInsecure())
 	if err != nil {
@@ -111,10 +139,20 @@ func main() {
 		log.Fatalf("failed to net.Listen(%v): %v", *flagAddr, err)
 	}
 
+	dbc, err := sql.Open("postgres", *flagDatabase)
+	if err != nil {
+		log.Fatalf("sql.Open(\"postgres\", %q): %v", *flagDatabase, err)
+	}
+
+	db, err := NewDatabase(context.Background(), dbc)
+	if err != nil {
+		log.Fatalf("NewDatabase: %v", err)
+	}
+
 	s := grpc.NewServer()
 	serv := &server{
-		mvln:       mvln,
-		macsToVLAN: make(map[string]int),
+		mvln: mvln,
+		db:   db,
 	}
 	pb.RegisterCaptivateServer(s, serv)
 	reflection.Register(s)
