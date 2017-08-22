@@ -249,6 +249,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(v)
 	})
+	stateCodeMap := make(map[string]bool)
 	http.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -292,47 +293,53 @@ func main() {
 		}
 
 		sentState := r.URL.Query().Get("state")
+		sentCode := r.URL.Query().Get("code")
 		if sentState != mac.String() {
 			log.Printf("client sent bad state: MAC is %q, but state was %q", mac, sentState)
 			http.Error(w, "bad session state", http.StatusBadRequest)
 			return
 		}
 
-		tok, err := conf.Exchange(ctx, r.URL.Query().Get("code"))
-		if err != nil {
-			log.Printf("failed to exchange oauth token for %v: %v", mac, err)
-			http.Error(w, "bad oauth token", http.StatusBadRequest)
-			return
-		}
+		scmKey := fmt.Sprintf("%s!!%s", sentState, sentCode)
+		if !stateCodeMap[scmKey] {
+			stateCodeMap[scmKey] = true
 
-		client := conf.Client(ctx, tok)
-		resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
-		if err != nil {
-			log.Printf("failed to retrieve userinfo for %v: %v", mac, err)
-			http.Error(w, fmt.Sprintf("google userinfo API failed: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
+			tok, err := conf.Exchange(ctx, r.URL.Query().Get("code"))
+			if err != nil {
+				log.Printf("failed to exchange oauth token for %v: %v", mac, err)
+				http.Error(w, "bad oauth token", http.StatusBadRequest)
+				return
+			}
 
-		type Data struct {
-			Email         string `json:"email"`
-			EmailVerified bool   `json:"email_verified"`
-		}
-		var d Data
-		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
-			log.Printf("failed to decode userinfo for %v: %v", mac, err)
-			http.Error(w, fmt.Sprintf("google userinfo API returned garbage: %v", err), http.StatusBadGateway)
-			return
-		}
+			client := conf.Client(ctx, tok)
+			resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
+			if err != nil {
+				log.Printf("failed to retrieve userinfo for %v: %v", mac, err)
+				http.Error(w, fmt.Sprintf("google userinfo API failed: %v", err), http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
 
-		if !d.EmailVerified {
-			log.Printf("google says %v does not have verified email (MAC: %q)", d.Email, mac)
-			http.Error(w, fmt.Sprintf("user %v does not have verified email", d.Email), http.StatusBadRequest)
-			return
-		}
+			type Data struct {
+				Email         string `json:"email"`
+				EmailVerified bool   `json:"email_verified"`
+			}
+			var d Data
+			if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+				log.Printf("failed to decode userinfo for %v: %v", mac, err)
+				http.Error(w, fmt.Sprintf("google userinfo API returned garbage: %v", err), http.StatusBadGateway)
+				return
+			}
 
-		if err := authorizeMAC(ctx, mac, d.Email); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			if !d.EmailVerified {
+				log.Printf("google says %v does not have verified email (MAC: %q)", d.Email, mac)
+				http.Error(w, fmt.Sprintf("user %v does not have verified email", d.Email), http.StatusBadRequest)
+				return
+			}
+
+			if err := authorizeMAC(ctx, mac, d.Email); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}
 
 		next := r.URL.Query().Get("next")
