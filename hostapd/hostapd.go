@@ -88,7 +88,9 @@ func (c *Connection) eventHandler(s string) {
 		if err != nil {
 			log.Printf("hostapd: failed to parse MAC in %q: %v", s, err)
 		}
-		c.cb(STAConnected{mac})
+		if c.cb != nil {
+			c.cb(STAConnected{mac})
+		}
 	default:
 		log.Printf("hostapd: unhandled message %q", s)
 		// too lazy to figure the rest out, whatever
