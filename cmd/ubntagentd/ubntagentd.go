@@ -19,7 +19,9 @@ package main
 import (
 	"flag"
 	"log"
+	"log/syslog"
 	"net"
+	"os"
 
 	"google.golang.org/grpc"
 
@@ -32,6 +34,8 @@ var (
 
 	flagCaptivatedAddr = flag.String("captivated-addr", "[::1]:21000", "address to connect to captivated on")
 
+	flagLogToStderr = flag.Bool("log-to-stderr", false, "log to stderr instead of syslog")
+
 	flagHostapdSocketDir = flag.String("hostapd-socket-dir", "/var/run/hostapd", "socket location for hostapd control sockets")
 
 	flagRadiusAddr   = flag.String("radius-listen", "127.0.0.1:1812", "address to listen on for RADIUS authentication requests")
@@ -40,6 +44,15 @@ var (
 
 func main() {
 	flag.Parse()
+
+	if !*flagLogToStderr {
+		logw, err := syslog.Dial("unixgram", "/dev/log", syslog.LOG_WARNING|syslog.LOG_DAEMON, "ubntagentd")
+		if err != nil {
+			log.Println("failed to open syslog: %v", err)
+			os.Exit(1)
+		}
+		log.SetOutput(logw)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
