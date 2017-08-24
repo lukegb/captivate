@@ -28,7 +28,11 @@ const (
 
 // ListTransports lists the sockets available in the hostapd directory.
 func ListTransports(dir string) ([]string, error) {
-	dents, err := ioutil.ReadDir(HostapdSocketDirectory)
+	if dir == "" {
+		dir = HostapdSocketDirectory
+	}
+
+	dents, err := ioutil.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
