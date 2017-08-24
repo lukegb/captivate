@@ -145,3 +145,15 @@ func (c *Connection) Disassociate(ctx context.Context, mac net.HardwareAddr) err
 	}
 	return nil
 }
+
+func (c *Connection) Ping(ctx context.Context) error {
+	resp, err := c.t.Transceive(ctx, "PING")
+	if err != nil {
+		return err
+	}
+
+	if resp != "PONG\n" {
+		return fmt.Errorf("expected PONG; git %q", resp)
+	}
+	return nil
+}
