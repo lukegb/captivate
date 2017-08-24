@@ -60,7 +60,7 @@ func (s *Transport) recver() {
 		if len(msg) >= 1 && msg[0] == '<' {
 			// unsolicited message
 			if s.cb != nil {
-				s.cb(msg)
+				go s.cb(msg)
 			}
 		} else {
 			// response to request

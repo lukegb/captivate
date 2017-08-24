@@ -25,6 +25,10 @@ import (
 	"strings"
 )
 
+const (
+	hostapOK = "OK\n"
+)
+
 type Connection struct {
 	t *Transport
 
@@ -118,4 +122,16 @@ func (c *Connection) ListStations(ctx context.Context) (map[string]map[string]st
 		msg = fmt.Sprintf("STA-NEXT %s", pieces[0])
 	}
 	return ret, nil
+}
+
+func (c *Connection) Disassociate(ctx context.Context, mac net.HardwareAddr) error {
+	resp, err := c.t.Transceive(ctx, fmt.Sprintf("DISASSOCIATE %s", mac.String()))
+	if err != nil {
+		return err
+	}
+
+	if resp != hostapOK {
+		return fmt.Errorf("expected %q; got %q", hostapOK, resp)
+	}
+	return nil
 }
