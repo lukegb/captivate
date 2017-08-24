@@ -62,6 +62,10 @@ func FromTransport(ctx context.Context, t *Transport) (*Connection, error) {
 	return c, nil
 }
 
+func (c *Connection) Close() error {
+	return c.t.Close()
+}
+
 func (c *Connection) eventHandler(s string) {
 	if c.cb == nil {
 		// do nothing
