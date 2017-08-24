@@ -43,44 +43,36 @@ func (db *Database) MarkDeviceSeen(ctx context.Context, mac net.HardwareAddr) er
 	return err
 }
 
-func (db *Database) GetMACVLANInterfaceForDevice(ctx context.Context, mac net.HardwareAddr) (string, error) {
-	return db.getMACVLANInterfaceForDevice(ctx, mac, true)
+func (db *Database) GetVLANForDevice(ctx context.Context, mac net.HardwareAddr) (uint32, error) {
+	return db.getVLANForDevice(ctx, mac, true)
 }
 
 func macForDB(mac net.HardwareAddr) []byte {
 	return []byte(mac.String())
 }
 
-func (db *Database) getMACVLANInterfaceForDevice(ctx context.Context, mac net.HardwareAddr, retry bool) (string, error) {
+func (db *Database) getVLANForDevice(ctx context.Context, mac net.HardwareAddr, retry bool) (uint32, error) {
 	// do we already know what this should be?
-	row := db.c.QueryRowContext(ctx, `
-SELECT
-	v.macvlan_interface
-FROM
-	device d
-INNER JOIN
-	vlan v ON v.id=d.vlan_id
-WHERE
-	d.mac=$1`, macForDB(mac))
+	row := db.c.QueryRowContext(ctx, `SELECT vlan_id FROM device WHERE mac=$1`, macForDB(mac))
 
-	var intf string
-	if err := row.Scan(&intf); err == nil {
-		return intf, nil
+	var vlanID uint32
+	if err := row.Scan(&vlanID); err == nil {
+		return vlanID, nil
 	} else if err != sql.ErrNoRows {
-		return "", err
+		return 0, err
 	}
 
 	if !retry {
-		return "", fmt.Errorf("getMACVLANInterfaceForDevice could not find the record it just inserted")
+		return 0, fmt.Errorf("getVLANForDevice could not find the record it just inserted")
 	}
 
 	// we don't, insert a valid default record and try again
 	_, err := db.c.ExecContext(ctx, `INSERT INTO device (mac, created_at, last_seen_at) VALUES ($1, NOW(), NOW())`, macForDB(mac))
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	// do the select again
-	return db.getMACVLANInterfaceForDevice(ctx, mac, false)
+	return db.getVLANForDevice(ctx, mac, false)
 }
 
 func (db *Database) SetUserForDevice(ctx context.Context, mac net.HardwareAddr, email string) error {

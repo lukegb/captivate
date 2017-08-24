@@ -22,6 +22,9 @@ service Captivate {
 	// Informs Captivate that a new client has appeared.
 	rpc SawClient(SawClientRequest) returns (SawClientReply) {}
 
+	// Allows Captivate to inform clients that a VLAN assignment has changed.
+	rpc WatchVLANAssignmentChange(WatchVLANAssignmentChangeRequest) returns (stream VLANAssignmentChange) {}
+
 	// Informs Captivate that a client has authenticated.
 	rpc ClientAuthenticated(ClientAuthenticatedRequest) returns (ClientAuthenticatedReply) {}
 }
@@ -30,7 +33,16 @@ message SawClientRequest {
 	string mac = 1;
 }
 
-message SawClientReply {}
+message SawClientReply {
+	uint32 vlan = 1;
+}
+
+message WatchVLANAssignmentChangeRequest {}
+
+message VLANAssignmentChange {
+	string mac = 1;
+	uint32 vlan = 2;
+}
 
 message ClientAuthenticatedRequest {
 	string mac = 1;

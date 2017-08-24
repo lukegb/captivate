@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -33,14 +34,15 @@ import (
 )
 
 var (
-	flagAddr        = flag.String("addr", "[::1]:21000", "address to listen for gRPC requests on")
-	flagMACVLANAddr = flag.String("macvland-addr", "[::1]:21001", "address to connect to macvland on")
-	flagDatabase    = flag.String("db-conn", "user=captivated dbname=captivated sslmode=disable", "database connection string")
+	flagAddr     = flag.String("addr", "[::1]:21000", "address to listen for gRPC requests on")
+	flagDatabase = flag.String("db-conn", "user=captivated dbname=captivated sslmode=disable", "database connection string")
 )
 
 type server struct {
-	mvln pb.MACVLANClient
-	db   *Database
+	db *Database
+
+	watchMu  sync.Mutex
+	watchers []chan *pb.VLANAssignmentChange
 }
 
 func (s *server) SawClient(ctx context.Context, req *pb.SawClientRequest) (*pb.SawClientReply, error) {
@@ -53,11 +55,11 @@ func (s *server) SawClient(ctx context.Context, req *pb.SawClientRequest) (*pb.S
 		return nil, fmt.Errorf("invalid MAC %v", req.Mac)
 	}
 
-	log.Printf("SawClient: MAC=%v; macvlan is pending", mac)
-	mvlan, err := s.db.GetMACVLANInterfaceForDevice(ctx, mac)
+	log.Printf("SawClient: MAC=%v; VLAN is pending", mac)
+	vlanID, err := s.db.GetVLANForDevice(ctx, mac)
 	if err != nil {
-		log.Printf("SawClient got error from GetMACVLANInterfaceForDevice(%v): %v", mac, err)
-		return nil, fmt.Errorf("GetMACVLANInterfaceForDevice(%v): %v", mac, err)
+		log.Printf("SawClient got error from GetVLANForDevice(%v): %v", mac, err)
+		return nil, fmt.Errorf("GetVLANForDevice(%v): %v", mac, err)
 	}
 
 	err = s.db.MarkDeviceSeen(ctx, mac)
@@ -65,17 +67,11 @@ func (s *server) SawClient(ctx context.Context, req *pb.SawClientRequest) (*pb.S
 		log.Printf("SawClient got error from MarkDeviceSeen(%v): %v; carrying on anyway", mac, err)
 	}
 
-	log.Printf("SawClient: MAC=%v; macvlan=%v", mac, mvlan)
+	log.Printf("SawClient: MAC=%v; vlan=%v", mac, vlanID)
 
-	_, err = s.mvln.Authorise(ctx, &pb.AuthoriseRequest{
-		Interface: mvlan,
-		Mac:       mac.String(),
-	})
-	if err != nil {
-		log.Printf("SawClient got error from Authorise %v onto %v: %v", req.Mac, mvlan, err)
-		return nil, err
-	}
-	return &pb.SawClientReply{}, nil
+	return &pb.SawClientReply{
+		Vlan: vlanID,
+	}, nil
 }
 
 func (s *server) ClientAuthenticated(ctx context.Context, req *pb.ClientAuthenticatedRequest) (*pb.ClientAuthenticatedReply, error) {
@@ -88,7 +84,7 @@ func (s *server) ClientAuthenticated(ctx context.Context, req *pb.ClientAuthenti
 		return nil, fmt.Errorf("invalid MAC %v", req.Mac)
 	}
 
-	log.Printf("ClientAuthenticated: MAC=%v; Email=%v; macvlan is pending", mac, req.Email)
+	log.Printf("ClientAuthenticated: MAC=%v; Email=%v; vlan is pending", mac, req.Email)
 
 	err = s.db.SetUserForDevice(ctx, mac, req.Email)
 	if err != nil {
@@ -101,23 +97,49 @@ func (s *server) ClientAuthenticated(ctx context.Context, req *pb.ClientAuthenti
 		log.Printf("ClientAuthenticated got error from MarkDeviceSeen(%v): %v; carrying on anyway", mac, err)
 	}
 
-	mvlan, err := s.db.GetMACVLANInterfaceForDevice(ctx, mac)
+	vlanID, err := s.db.GetVLANForDevice(ctx, mac)
 	if err != nil {
-		log.Printf("ClientAuthenticated got error from GetMACVLANInterfaceForDevice(%v): %v", mac, err)
-		return nil, fmt.Errorf("GetMACVLANInterfaceForDevice(%v): %v", mac, err)
+		log.Printf("ClientAuthenticated got error from GetVLANForDevice(%v): %v", mac, err)
+		return nil, fmt.Errorf("GetVLANForDevice(%v): %v", mac, err)
 	}
 
-	log.Printf("ClientAuthenticated: MAC=%v; Email=%v; macvlan=%v", mac, req.Email, mvlan)
-
-	_, err = s.mvln.Authorise(ctx, &pb.AuthoriseRequest{
-		Interface: mvlan,
-		Mac:       mac.String(),
-	})
-	if err != nil {
-		log.Printf("ClientAuthenticated: error Authorise %v onto %v: %v", req.Mac, mvlan, err)
-		return nil, err
+	log.Printf("ClientAuthenticated: MAC=%v; Email=%v; vlan=%v", mac, req.Email, vlanID)
+	s.watchMu.Lock()
+	vac := pb.VLANAssignmentChange{
+		Mac:  mac.String(),
+		Vlan: vlanID,
 	}
+	for _, w := range s.watchers {
+		w <- &vac
+	}
+	s.watchMu.Unlock()
+
 	return &pb.ClientAuthenticatedReply{}, nil
+}
+
+func (s *server) WatchVLANAssignmentChange(req *pb.WatchVLANAssignmentChangeRequest, stream pb.Captivate_WatchVLANAssignmentChangeServer) error {
+	ch := make(chan *pb.VLANAssignmentChange)
+	s.watchMu.Lock()
+	s.watchers = append(s.watchers, ch)
+	s.watchMu.Unlock()
+	defer func() {
+		s.watchMu.Lock()
+		newWatchers := make([]chan *pb.VLANAssignmentChange, 0, len(s.watchers)-1)
+		for _, w := range s.watchers {
+			if w != ch {
+				newWatchers = append(newWatchers, w)
+			}
+		}
+		s.watchers = newWatchers
+		s.watchMu.Unlock()
+	}()
+
+	for change := range ch {
+		if err := stream.Send(change); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func main() {
@@ -125,14 +147,7 @@ func main() {
 
 	log.Println("captivated starting up")
 	log.Printf("addr: %v", *flagAddr)
-	log.Printf("macvland-addr: %v", *flagMACVLANAddr)
 	log.Printf("db-conn: %v", *flagDatabase)
-
-	mvconn, err := grpc.Dial(*flagMACVLANAddr, grpc.WithInsecure())
-	if err != nil {
-		log.Fatalf("grpc.Dial(%v): %v", *flagMACVLANAddr, err)
-	}
-	mvln := pb.NewMACVLANClient(mvconn)
 
 	lis, err := net.Listen("tcp", *flagAddr)
 	if err != nil {
@@ -151,8 +166,7 @@ func main() {
 
 	s := grpc.NewServer()
 	serv := &server{
-		mvln: mvln,
-		db:   db,
+		db: db,
 	}
 	pb.RegisterCaptivateServer(s, serv)
 	reflection.Register(s)
