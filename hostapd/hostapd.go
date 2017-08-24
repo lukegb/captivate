@@ -117,6 +117,10 @@ func (c *Connection) ListStations(ctx context.Context) (map[string]map[string]st
 
 		m := make(map[string]string)
 		pieces := strings.Split(resp, "\n")
+		if pieces[0] == "FAIL" {
+			break // probably the end *sigh*
+		}
+
 		for _, ln := range pieces[1:] {
 			if ln == "" {
 				break
