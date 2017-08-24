@@ -80,9 +80,14 @@ func (h *radiusHandler) ServeRADIUS(w radius.ResponseWriter, r *radius.Request) 
 			return fmt.Errorf("captivated returned error: %v", err)
 		}
 
+		log.Printf("radius: assigning %s to VLAN %d", mac, resp.Vlan)
+		if err := ubiquiti.SetVLAN(mac, resp.Vlan); err != nil {
+			return fmt.Errorf("error assigning to VLAN: %s", err)
+		}
+
 		go func() {
 			// spray and pray
-			for n := 0; n < 60; n++ {
+			for n := 0; n < 100; n++ {
 				log.Printf("radius: assigning %s to VLAN %d - %d", mac, resp.Vlan, n)
 				if err := ubiquiti.SetVLAN(mac, resp.Vlan); err != nil {
 					return
