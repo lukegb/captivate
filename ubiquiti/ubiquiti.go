@@ -68,6 +68,7 @@ func SetVLANOnInterface(intf string, mac net.HardwareAddr, vlanID uint32) error 
 	if err != nil {
 		return fmt.Errorf("opening inet socket: %v", err)
 	}
+	defer syscall.Close(fd)
 
 	return setVLAN(fd, intf, mac, vlanID)
 }
@@ -79,6 +80,7 @@ func SetVLAN(mac net.HardwareAddr, vlanID uint32) error {
 	if err != nil {
 		return fmt.Errorf("opening inet socket: %v", err)
 	}
+	defer syscall.Close(fd)
 
 	// enumerate interfaces
 	intfs, err := net.Interfaces()
